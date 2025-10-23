@@ -634,4 +634,168 @@ export const selectEvmTokens = createDeepEqualSelector(
 );
 
 /**
- * selectEvmToke
+ * selectEvmTokenFiatBalances
+ */
+export const selectEvmTokenFiatBalances = createDeepEqualSelector(
+  selectEvmTokens,
+  selectTokenMarketData,
+  selectTokensBalances,
+  selectSelectedInternalAccountAddress,
+  selectNetworkConfigurations,
+  selectCurrencyRates,
+  selectCurrentCurrency,
+  (
+    evmTokensWrapper,
+    multiChainMarketData,
+    multiChainTokenBalance,
+    selectedInternalAccountAddress,
+    networkConfigurationsByChainId,
+    multiChainCurrencyRates,
+    currentCurrency,
+  ): RawDerived<number[] | null> => {
+    const raw = {
+      evmTokensRaw: evmTokensWrapper?.raw,
+      evmTokensDerived: evmTokensWrapper?.derived,
+      multiChainMarketData,
+      multiChainTokenBalance,
+      selectedInternalAccountAddress,
+      networkConfigurationsByChainId,
+      multiChainCurrencyRates,
+      currentCurrency,
+    };
+
+    console.log('[evm.ts] selectEvmTokenFiatBalances - raw', raw);
+
+    const evmTokens = evmTokensWrapper?.derived || [];
+
+    const derived = evmTokens.map((token) => {
+      const chainId = token.chainId as Hex;
+      const multiChainExchangeRates = multiChainMarketData?.[chainId];
+      const multiChainTokenBalances =
+        multiChainTokenBalance?.[selectedInternalAccountAddress as Hex]?.[
+          chainId
+        ];
+      const nativeCurrency =
+        networkConfigurationsByChainId[chainId]?.nativeCurrency;
+      const multiChainConversionRate =
+        multiChainCurrencyRates?.[nativeCurrency]?.conversionRate || 0;
+
+      return token.isETH || token.isNative
+        ? parseFloat(token.balance) * multiChainConversionRate
+        : deriveBalanceFromAssetMarketDetails(
+            token,
+            multiChainExchangeRates || {},
+            multiChainTokenBalances || {},
+            multiChainConversionRate || 0,
+            currentCurrency || '',
+          ).balanceFiatCalculation;
+    });
+
+    return { raw, derived };
+  },
+);
+
+/**
+ * selectEvmTokenMarketData
+ */
+export const selectEvmTokenMarketData = createDeepEqualSelector(
+  [
+    selectTokenList,
+    selectTokenMarketData,
+    (_state: RootState, params: { chainId: Hex; tokenAddress?: string }) =>
+      params.chainId,
+    (_state: RootState, params: { chainId: Hex; tokenAddress?: string }) =>
+      params.tokenAddress,
+  ],
+  (tokenList, marketData, chainId, tokenAddress): RawDerived<any> => {
+    const raw = { tokenList, marketData, chainId, tokenAddress };
+
+    console.log('[evm.ts] selectEvmTokenMarketData - raw', raw);
+
+    if (!tokenAddress) {
+      const derived = marketData?.[chainId]?.[zeroAddress() as Hex];
+      return { raw, derived };
+    }
+
+    const checksumAddress = safeToChecksumAddress(tokenAddress);
+    if (!checksumAddress) {
+      return { raw, derived: null };
+    }
+
+    const tokenMetadata = tokenList?.[checksumAddress.toLowerCase()];
+    const tokenMarketData = marketData?.[chainId]?.[checksumAddress as Hex];
+
+    const derived = { metadata: tokenMetadata, marketData: tokenMarketData };
+
+    return { raw, derived };
+  },
+);
+
+/**
+ * makeSelectAssetByAddressAndChainId
+ */
+export const makeSelectAssetByAddressAndChainId = () =>
+  createSelector(
+    [
+      selectEvmTokens,
+      selectIsEvmNetworkSelected,
+      (
+        _state: RootState,
+        params: { address: string; chainId: string; isStaked?: boolean },
+      ) => toFormattedAddress(params.address),
+      (
+        _state: RootState,
+        params: { address: string; chainId: string; isStaked?: boolean },
+      ) => params.chainId,
+      (
+        _state: RootState,
+        params: { address: string; chainId: string; isStaked?: boolean },
+      ) => params.isStaked,
+    ],
+    (
+      tokensWrapper,
+      isEvmNetworkSelected,
+      address,
+      chainId,
+      isStaked,
+    ): RawDerived<TokenI | undefined> => {
+      const raw = {
+        tokensRaw: tokensWrapper?.raw,
+        tokensDerived: tokensWrapper?.derived,
+        isEvmNetworkSelected,
+        address,
+        chainId,
+        isStaked,
+      };
+
+      console.log('[evm.ts] makeSelectAssetByAddressAndChainId - raw', raw);
+
+      if (!isEvmNetworkSelected) {
+        return { raw, derived: undefined };
+      }
+
+      const tokens = tokensWrapper?.derived || [];
+
+      const lookup = new Map<string, Map<string, Map<boolean, TokenI>>>();
+
+      for (const token of tokens) {
+        if (!token.chainId || !token.address) continue;
+
+        const tokenChainId = token.chainId;
+        const tokenAddress = toFormattedAddress(token.address) as string;
+        const tokenIsStaked = Boolean(token.isStaked);
+
+        if (!lookup.has(tokenChainId)) lookup.set(tokenChainId, new Map());
+        const chainMap = lookup.get(tokenChainId);
+
+        if (chainMap && !chainMap.has(tokenAddress)) chainMap.set(tokenAddress, new Map());
+        const addressMap = chainMap?.get(tokenAddress);
+
+        if (addressMap) addressMap.set(tokenIsStaked, token);
+      }
+
+      const token = lookup.get(chainId)?.get(address as string)?.get(Boolean(isStaked));
+
+      return { raw, derived: token };
+    },
+  );
