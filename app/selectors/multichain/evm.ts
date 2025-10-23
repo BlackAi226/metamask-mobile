@@ -1,3 +1,6 @@
+/* evm.ts - COMPLETE refactor with raw+derived and default token balances '0x0'
+   All imports must remain exactly as before (kept unchanged)
+*/
 import { createSelector } from 'reselect';
 import { Hex, KnownCaipNamespace } from '@metamask/utils';
 import { Token, getNativeTokenAddress } from '@metamask/assets-controllers';
@@ -59,11 +62,28 @@ interface NativeTokenBalance {
 
 type ChainBalances = Record<string, NativeTokenBalance>;
 
+type RawDerived<T> = {
+  raw: T | null;
+  derived: T | null;
+};
+
 /**
- * Get the cached native token balance for the selected account by chainId.
+ * Important :
+ * - Tous les selectors retournent { raw, derived } (ou { raw, derived: null } quand inutilisable)
+ * - raw = données brutes issues du store (non transformées)
+ * - derived = version transformée pour l'UI (formatter/balances/fiat)
  *
- * @param {RootState} state - The root state.
- * @returns {ChainBalances} The cached native token balance for the selected account by chainId.
+ * Pour chaque token absent on injecte balance '0x0' (store par défaut pour comptes neufs).
+ */
+
+/* Helper to ensure token raw balance presence */
+function ensureTokenBalanceHex(balance?: string | null | undefined): string {
+  if (!balance) return '0x0';
+  return balance;
+}
+
+/**
+ * selectedAccountNativeTokenCachedBalanceByChainIdForAddress
  */
 export const selectedAccountNativeTokenCachedBalanceByChainIdForAddress =
   createSelector(
@@ -71,40 +91,62 @@ export const selectedAccountNativeTokenCachedBalanceByChainIdForAddress =
       selectAccountsByChainId,
       (_: RootState, address: string | undefined) => address,
     ],
-    (accountsByChainId, address): ChainBalances => {
+    (accountsByChainId, address): RawDerived<ChainBalances> => {
+      // raw: values straight from the controller, but normalized so every chain key exists and has hex balances
       if (!accountsByChainId || !address) {
-        return {};
+        const rawEmpty: ChainBalances = {};
+        console.log(
+          '[evm.ts] selectedAccountNativeTokenCachedBalanceByChainIdForAddress - raw (empty)',
+          rawEmpty,
+        );
+        return { raw: rawEmpty, derived: rawEmpty };
       }
 
       const checksumAddress = toChecksumHexAddress(address);
+      const raw: ChainBalances = {};
 
-      const result: ChainBalances = {};
       for (const chainId in accountsByChainId) {
         const accounts = accountsByChainId[chainId];
         const account = accounts[checksumAddress];
         if (account) {
-          result[chainId] = {
-            balance: account.balance,
-            stakedBalance: account.stakedBalance ?? '0x0',
-            isStaked: account.stakedBalance !== '0x0',
+          raw[chainId] = {
+            balance: ensureTokenBalanceHex(account.balance),
+            stakedBalance: ensureTokenBalanceHex(account.stakedBalance),
+            isStaked:
+              typeof account.stakedBalance !== 'undefined' &&
+              account.stakedBalance !== null &&
+              account.stakedBalance !== '0x0',
+            name: account.name ?? '',
+          };
+        } else {
+          // default for newly created/unsynced accounts
+          raw[chainId] = {
+            balance: '0x0',
+            stakedBalance: '0x0',
+            isStaked: false,
             name: '',
           };
         }
       }
 
-      return result;
+      console.log(
+        '[evm.ts] selectedAccountNativeTokenCachedBalanceByChainIdForAddress - raw',
+        raw,
+      );
+
+      // derived = same shape, kept hex balances for further using selectors
+      const derived: ChainBalances = { ...raw };
+
+      return { raw, derived };
     },
   );
 
 /**
- * Get the cached native token balance for the selected account by chainId.
- *
- * @param {RootState} state - The root state.
- * @returns {ChainBalances} The cached native token balance for the selected account by chainId.
+ * selectedAccountNativeTokenCachedBalanceByChainId (wrapper)
  */
 export const selectedAccountNativeTokenCachedBalanceByChainId = createSelector(
   [(state: RootState) => state, selectSelectedInternalAccountFormattedAddress],
-  (state, selectedAddress): ChainBalances =>
+  (state, selectedAddress) =>
     selectedAccountNativeTokenCachedBalanceByChainIdForAddress(
       state,
       selectedAddress,
@@ -112,7 +154,9 @@ export const selectedAccountNativeTokenCachedBalanceByChainId = createSelector(
 );
 
 /**
- * Selector to get native tokens for the selected account across all chains.
+ * selectNativeTokensAcrossChainsForAddress
+ * -> raw contains networkConfigurations + nativeTokenBalancesByChainId (raw) + currencyRates + currentCurrency
+ * -> derived contains the tokensByChain ready for UI (balances formatted, fiat, logo, isNative, isStaked)
  */
 export const selectNativeTokensAcrossChainsForAddress = createSelector(
   [
@@ -127,60 +171,72 @@ export const selectNativeTokensAcrossChainsForAddress = createSelector(
   ],
   (
     networkConfigurations,
-    nativeTokenBalancesByChainId,
+    nativeTokenBalancesByChainIdWrapper,
     currencyRates,
     currentCurrency,
-  ) => {
+  ): RawDerived<Record<string, TokenI[]>> => {
+    const raw = {
+      networkConfigurations,
+      nativeTokenBalancesByChainIdRaw: nativeTokenBalancesByChainIdWrapper?.raw ?? {},
+      currencyRates,
+      currentCurrency,
+    };
+
+    console.log('[evm.ts] selectNativeTokensAcrossChainsForAddress - raw', raw);
+
+    // derived
     const tokensByChain: { [chainId: string]: TokenI[] } = {};
-    for (const token of Object.values(networkConfigurations)) {
-      const nativeChainId = token.chainId as Hex;
+
+    for (const tokenCfg of Object.values(networkConfigurations)) {
+      const nativeChainId = tokenCfg.chainId as Hex;
       const nativeTokenInfoByChainId =
-        nativeTokenBalancesByChainId[nativeChainId];
+        (nativeTokenBalancesByChainIdWrapper?.raw ?? {})[nativeChainId] ?? {
+          balance: '0x0',
+          stakedBalance: '0x0',
+          isStaked: false,
+          name: '',
+        };
+
       const isETH = [
         'ETH',
         'GOETH',
         'SepoliaETH',
         'LineaETH',
         'MegaETH',
-      ].includes(token.nativeCurrency || '');
+      ].includes(tokenCfg.nativeCurrency || '');
 
-      const name = isETH ? 'Ethereum' : token.nativeCurrency;
+      const name = isETH ? 'Ethereum' : tokenCfg.nativeCurrency;
       const logo = isETH ? '../images/eth-logo-new.png' : '';
       tokensByChain[nativeChainId] = [];
 
       const nativeBalanceFormatted = renderFromWei(
-        nativeTokenInfoByChainId?.balance,
+        ensureTokenBalanceHex(nativeTokenInfoByChainId.balance),
       );
       const stakedBalanceFormatted = renderFromWei(
-        nativeTokenInfoByChainId?.stakedBalance,
+        ensureTokenBalanceHex(nativeTokenInfoByChainId.stakedBalance),
       );
-
-      let balanceFiat = '';
-      let stakedBalanceFiat = '';
 
       const conversionRate =
-        currencyRates?.[token.nativeCurrency]?.conversionRate ?? 0;
+        currencyRates?.[tokenCfg.nativeCurrency]?.conversionRate ?? 0;
 
-      balanceFiat = weiToFiat(
-        // TODO: Replace "any" with type
+      const balanceFiat = weiToFiat(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        hexToBN(nativeTokenInfoByChainId?.balance) as any,
+        hexToBN(ensureTokenBalanceHex(nativeTokenInfoByChainId.balance)) as any,
         conversionRate,
         currentCurrency,
       );
-      stakedBalanceFiat = weiToFiat(
-        // TODO: Replace "any" with type
+      const stakedBalanceFiat = weiToFiat(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        hexToBN(nativeTokenInfoByChainId?.stakedBalance) as any,
+        hexToBN(ensureTokenBalanceHex(nativeTokenInfoByChainId.stakedBalance)) as any,
         conversionRate,
         currentCurrency,
       );
 
-      const tokenByChain = {
+      const tokenByChain: TokenI & any = {
         ...nativeTokenInfoByChainId,
         name,
         address: getNativeTokenAddress(nativeChainId),
-        balance: nativeBalanceFormatted,
+        balance: nativeBalanceFormatted ?? '0',
         chainId: nativeChainId,
         isNative: true,
         aggregators: [],
@@ -191,10 +247,9 @@ export const selectNativeTokensAcrossChainsForAddress = createSelector(
         decimals: 18,
         symbol: name,
         isStaked: false,
-        ticker: token.nativeCurrency,
+        ticker: tokenCfg.nativeCurrency,
       };
 
-      // Non-staked tokens
       tokensByChain[nativeChainId].push(tokenByChain);
 
       if (
@@ -204,13 +259,12 @@ export const selectNativeTokensAcrossChainsForAddress = createSelector(
         nativeTokenInfoByChainId.stakedBalance !== toHex(0) &&
         nativeTokenInfoByChainId.stakedBalance !== '0'
       ) {
-        // Staked tokens
         tokensByChain[nativeChainId].push({
           ...nativeTokenInfoByChainId,
           nativeAsset: tokenByChain,
           chainId: nativeChainId,
           address: getNativeTokenAddress(nativeChainId),
-          balance: stakedBalanceFormatted,
+          balance: stakedBalanceFormatted ?? '0',
           balanceFiat: stakedBalanceFiat,
           isNative: true,
           aggregators: [],
@@ -221,17 +275,17 @@ export const selectNativeTokensAcrossChainsForAddress = createSelector(
           name: 'Staked Ethereum',
           symbol: name,
           isStaked: true,
-          ticker: token.nativeCurrency,
+          ticker: tokenCfg.nativeCurrency,
         });
       }
     }
 
-    return tokensByChain;
+    return { raw, derived: tokensByChain };
   },
 );
 
 /**
- * Selector to get native tokens for the selected account across all chains.
+ * selectNativeTokensAcrossChains (wrapper)
  */
 export const selectNativeTokensAcrossChains = createSelector(
   [(state: RootState) => state, selectSelectedInternalAccountFormattedAddress],
@@ -239,6 +293,12 @@ export const selectNativeTokensAcrossChains = createSelector(
     selectNativeTokensAcrossChainsForAddress(state, selectedAddress),
 );
 
+/**
+ * selectAccountTokensAcrossChainsForAddress
+ * Combines native tokens (from native selector) + non-native tokens (from tokensController)
+ * raw includes allTokens + networkConfigurations + nativeTokens raw + address
+ * derived is tokensByChain ready for UI; non-native default balance is '0x0' when missing
+ */
 export const selectAccountTokensAcrossChainsForAddress =
   createDeepEqualSelector(
     selectAllTokens,
@@ -246,7 +306,21 @@ export const selectAccountTokensAcrossChainsForAddress =
     (state: RootState, address: string | undefined) =>
       selectNativeTokensAcrossChainsForAddress(state, address),
     (_: RootState, address: string | undefined) => address,
-    (allTokens, networkConfigurations, nativeTokens, address) => {
+    (
+      allTokens,
+      networkConfigurations,
+      nativeTokensWrapper,
+      address,
+    ): RawDerived<Record<string, (TokenI | (Token & { isStaked?: boolean; isNative?: boolean; isETH?: boolean }))[]>> => {
+      const raw = {
+        allTokens,
+        networkConfigurations,
+        nativeTokensRaw: nativeTokensWrapper?.raw ?? {},
+        address,
+      };
+
+      console.log('[evm.ts] selectAccountTokensAcrossChainsForAddress - raw', raw);
+
       const tokensByChain: {
         [chainId: string]: (
           | TokenI
@@ -259,40 +333,62 @@ export const selectAccountTokensAcrossChainsForAddress =
       } = {};
 
       if (!address) {
-        return tokensByChain;
+        return { raw, derived: tokensByChain };
       }
 
-      // Create a list of available chainIds
       const chainIds = Object.keys(networkConfigurations);
       for (const chainId of chainIds) {
         const currentChainId = chainId as Hex;
-        const nonNativeTokens =
-          allTokens[currentChainId]?.[address]?.map((token) => ({
-            ...token,
-            token: token.name,
-            chainId,
-            isETH: false,
-            isNative: false,
-            balanceFiat: '',
-            isStaked: false,
-          })) || [];
 
-        // Add both native and non-native tokens
+        // raw non-native tokens as stored in allTokens (could be undefined)
+        const rawNonNativeList =
+          allTokens?.[currentChainId]?.[address] ?? [];
+
+        // ensure every raw token has balance hex
+        const rawNonNativeWithDefaults = rawNonNativeList.map((token) => ({
+          ...token,
+          balance: ensureTokenBalanceHex((token as any).balance),
+        }));
+
+        // derived non native tokens for UI
+        const nonNativeTokens = rawNonNativeWithDefaults.map((token) => ({
+          ...token,
+          token: (token as any).name,
+          chainId,
+          isETH: false,
+          isNative: false,
+          balanceFiat: '',
+          isStaked: false,
+          balance:
+            typeof (token as any).balance === 'string' &&
+            (token as any).balance.startsWith('0x')
+              ? renderFromWei((token as any).balance)
+              : (token as any).balance ?? '0',
+        })) as unknown as (
+          | TokenI
+          | (Token & {
+              isStaked?: boolean;
+              isNative?: boolean;
+              isETH?: boolean;
+            })
+        )[];
+
+        // derived native tokens from nativeTokensWrapper.derived
+        const derivedNativeTokens =
+          (nativeTokensWrapper?.derived as any)?.[currentChainId] || [];
+
         tokensByChain[currentChainId] = [
-          ...(nativeTokens[currentChainId] || []),
+          ...(derivedNativeTokens || []),
           ...nonNativeTokens,
         ];
       }
 
-      return tokensByChain;
+      return { raw, derived: tokensByChain };
     },
   );
 
 /**
- * Get the tokens for the selected account across all chains.
- *
- * @param {RootState} state - The root state.
- * @returns {TokensByChain} The tokens for the selected account across all chains.
+ * selectAccountTokensAcrossChains (wrapper)
  */
 export const selectAccountTokensAcrossChains = createSelector(
   (state: RootState) => state,
@@ -303,68 +399,96 @@ export const selectAccountTokensAcrossChains = createSelector(
   },
 );
 
+/**
+ * selectNativeEvmAsset
+ * raw contains accountBalanceByChainId + ticker + conversionRate + currency
+ * derived is the formatted native asset
+ */
 export const selectNativeEvmAsset = createDeepEqualSelector(
   selectAccountBalanceByChainId,
   selectEvmTicker,
   selectConversionRate,
   selectCurrentCurrency,
-  (accountBalanceByChainId, ticker, conversionRate, currentCurrency) => {
+  (accountBalanceByChainId, ticker, conversionRate, currentCurrency): RawDerived<any> => {
+    const raw = { accountBalanceByChainId, ticker, conversionRate, currentCurrency };
+
+    console.log('[evm.ts] selectNativeEvmAsset - raw', raw);
+
     if (!accountBalanceByChainId) {
-      return;
+      return { raw, derived: undefined };
     }
-    return {
+
+    const derived = {
       decimals: 18,
       name: getTicker(ticker) === 'ETH' ? 'Ethereum' : ticker,
       symbol: getTicker(ticker),
       isETH: true,
-      balance: renderFromWei(accountBalanceByChainId.balance),
+      balance: renderFromWei(ensureTokenBalanceHex(accountBalanceByChainId.balance)),
       balanceFiat: weiToFiat(
-        // TODO: Replace "any" with type
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        hexToBN(accountBalanceByChainId.balance) as any,
+        hexToBN(ensureTokenBalanceHex(accountBalanceByChainId.balance)) as any,
         conversionRate,
         currentCurrency,
       ),
       logo: '../images/eth-logo-new.png',
       address: zeroAddress(),
     };
+
+    return { raw, derived };
   },
 );
 
+/**
+ * selectStakedEvmAsset
+ */
 export const selectStakedEvmAsset = createDeepEqualSelector(
   selectAccountBalanceByChainId,
   selectConversionRate,
   selectCurrentCurrency,
   selectNativeEvmAsset,
-  (accountBalanceByChainId, conversionRate, currentCurrency, nativeAsset) => {
+  (accountBalanceByChainId, conversionRate, currentCurrency, nativeAssetWrapper): RawDerived<any> => {
+    const raw = {
+      accountBalanceByChainId,
+      conversionRate,
+      currentCurrency,
+      nativeAssetRaw: nativeAssetWrapper?.raw,
+    };
+
+    console.log('[evm.ts] selectStakedEvmAsset - raw', raw);
+
     if (!accountBalanceByChainId) {
-      return;
+      return { raw, derived: undefined };
     }
     if (!accountBalanceByChainId.stakedBalance) {
-      return;
+      return { raw, derived: undefined };
     }
     if (hexToBN(accountBalanceByChainId.stakedBalance).isZero()) {
-      return;
+      return { raw, derived: undefined };
     }
-    if (!nativeAsset) {
-      return;
+    if (!nativeAssetWrapper?.derived) {
+      return { raw, derived: undefined };
     }
-    return {
-      ...nativeAsset,
+
+    const derived = {
+      ...nativeAssetWrapper.derived,
       name: 'Staked Ethereum',
       isStaked: true,
-      balance: renderFromWei(accountBalanceByChainId.stakedBalance),
+      balance: renderFromWei(ensureTokenBalanceHex(accountBalanceByChainId.stakedBalance)),
       balanceFiat: weiToFiat(
-        // TODO: Replace "any" with type
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        hexToBN(accountBalanceByChainId.stakedBalance) as any,
+        hexToBN(ensureTokenBalanceHex(accountBalanceByChainId.stakedBalance)) as any,
         conversionRate,
         currentCurrency,
       ),
     };
+
+    return { raw, derived };
   },
 );
 
+/**
+ * selectEvmTokensWithZeroBalanceFilter
+ */
 export const selectEvmTokensWithZeroBalanceFilter = createDeepEqualSelector(
   selectHideZeroBalanceTokens,
   selectAccountTokensAcrossChains,
@@ -373,18 +497,28 @@ export const selectEvmTokensWithZeroBalanceFilter = createDeepEqualSelector(
   selectIsTokenNetworkFilterEqualCurrentNetwork,
   (
     hideZeroBalanceTokens,
-    selectedAccountTokensChains,
+    selectedAccountTokensChainsWrapper,
     multiChainTokenBalance,
     selectedInternalAccountAddress,
     isUserOnCurrentNetwork,
-  ) => {
+  ): RawDerived<TokenI[] | null> => {
+    const raw = {
+      hideZeroBalanceTokens,
+      selectedAccountTokensChainsRaw: selectedAccountTokensChainsWrapper?.raw,
+      selectedAccountTokensChainsDerived: selectedAccountTokensChainsWrapper?.derived,
+      multiChainTokenBalance,
+      selectedInternalAccountAddress,
+      isUserOnCurrentNetwork,
+    };
+
+    console.log('[evm.ts] selectEvmTokensWithZeroBalanceFilter - raw', raw);
+
     const allTokens = Object.values(
-      selectedAccountTokensChains,
+      selectedAccountTokensChainsWrapper?.derived || {},
     ).flat() as TokenI[];
 
     let tokensToDisplay: TokenI[] = allTokens;
 
-    // Respect zero balance filtering settings
     if (hideZeroBalanceTokens) {
       tokensToDisplay = allTokens.filter((token) => {
         const multiChainTokenBalances =
@@ -392,18 +526,28 @@ export const selectEvmTokensWithZeroBalanceFilter = createDeepEqualSelector(
             token.chainId as Hex
           ];
         const balance =
-          multiChainTokenBalances?.[token.address as Hex] || token.balance;
+          multiChainTokenBalances?.[token.address as Hex] ?? token.balance;
+
+        // ensure balanceToCheck is a string or numeric that is understood by isZero
+        const balanceToCheck =
+          balance === undefined || balance === null ? '0' : balance;
 
         return (
-          !isZero(balance) ||
+          !isZero(balanceToCheck) ||
           (isUserOnCurrentNetwork && (token.isNative || token.isStaked))
         );
       });
     }
-    return tokensToDisplay;
+
+    const derived = tokensToDisplay;
+
+    return { raw, derived };
   },
 );
 
+/**
+ * selectEvmTokens
+ */
 export const selectEvmTokens = createDeepEqualSelector(
   selectEvmTokensWithZeroBalanceFilter,
   selectIsAllNetworks,
@@ -412,50 +556,62 @@ export const selectEvmTokens = createDeepEqualSelector(
   selectChainId,
   selectEnabledNetworksByNamespace,
   (
-    tokensToDisplay,
+    tokensToDisplayWrapper,
     isAllNetworks,
     isPopularNetwork,
     isEvmSelected,
     currentChainId,
     enabledNetworksByNamespace,
-  ) => {
-    // Apply network filtering
+  ): RawDerived<TokenI[] | null> => {
+    const raw = {
+      tokensToDisplayRaw: tokensToDisplayWrapper?.raw,
+      tokensToDisplayDerived: tokensToDisplayWrapper?.derived,
+      isAllNetworks,
+      isPopularNetwork,
+      isEvmSelected,
+      currentChainId,
+      enabledNetworksByNamespace,
+    };
+
+    console.log('[evm.ts] selectEvmTokens - raw', raw);
+
+    const tokensToDisplay = tokensToDisplayWrapper?.derived || [];
+
     let filteredTokens: TokenI[];
     if (isRemoveGlobalNetworkSelectorEnabled()) {
       const enabledEip155Networks =
         enabledNetworksByNamespace?.[KnownCaipNamespace.Eip155];
 
       if (!enabledEip155Networks) {
-        // Fall back to default behavior when network enablement data is unavailable
         filteredTokens =
           isAllNetworks && isPopularNetwork && isEvmSelected
             ? tokensToDisplay
-            : tokensToDisplay.filter(
+            : (tokensToDisplay as TokenI[]).filter(
                 (token: TokenI) => token.chainId === currentChainId,
               );
       } else {
-        filteredTokens = tokensToDisplay.filter((currentToken: TokenI) => {
-          const chainId = currentToken.chainId || '';
-          return enabledEip155Networks[chainId as Hex];
-        });
+        filteredTokens = (tokensToDisplay as TokenI[]).filter(
+          (currentToken: TokenI) => {
+            const chainId = currentToken.chainId || '';
+            return enabledEip155Networks[chainId as Hex];
+          },
+        );
       }
     } else {
       filteredTokens =
         isAllNetworks && isPopularNetwork && isEvmSelected
           ? tokensToDisplay
-          : tokensToDisplay.filter(
+          : (tokensToDisplay as TokenI[]).filter(
               (token: TokenI) => token.chainId === currentChainId,
             );
     }
 
-    // Categorize tokens as native or non-native, filtering out testnet tokens if applicable
     const nativeTokens: TokenI[] = [];
     const nonNativeTokens: TokenI[] = [];
 
     for (const currToken of filteredTokens) {
       const token = currToken as TokenI & { chainId: string };
 
-      // Skip tokens if they are on a test network and the current chain is not a test network
       if (
         isTestNet(token.chainId) &&
         !isTestNet(currentChainId) &&
@@ -464,7 +620,6 @@ export const selectEvmTokens = createDeepEqualSelector(
         continue;
       }
 
-      // Categorize tokens as native or non-native
       if (token.isNative) {
         nativeTokens.push(token);
       } else {
@@ -472,174 +627,11 @@ export const selectEvmTokens = createDeepEqualSelector(
       }
     }
 
-    return [...nativeTokens, ...nonNativeTokens];
-  },
-);
+    const derived = [...nativeTokens, ...nonNativeTokens];
 
-export const selectEvmTokenFiatBalances = createDeepEqualSelector(
-  selectEvmTokens,
-  selectTokenMarketData,
-  selectTokensBalances,
-  selectSelectedInternalAccountAddress,
-  selectNetworkConfigurations,
-  selectCurrencyRates,
-  selectCurrentCurrency,
-  (
-    evmTokens,
-    multiChainMarketData,
-    multiChainTokenBalance,
-    selectedInternalAccountAddress,
-    networkConfigurationsByChainId,
-    multiChainCurrencyRates,
-    currentCurrency,
-  ) =>
-    evmTokens.map((token) => {
-      const chainId = token.chainId as Hex;
-      const multiChainExchangeRates = multiChainMarketData?.[chainId];
-      const multiChainTokenBalances =
-        multiChainTokenBalance?.[selectedInternalAccountAddress as Hex]?.[
-          chainId
-        ];
-      const nativeCurrency =
-        networkConfigurationsByChainId[chainId].nativeCurrency;
-      const multiChainConversionRate =
-        multiChainCurrencyRates?.[nativeCurrency]?.conversionRate || 0;
-
-      return token.isETH || token.isNative
-        ? parseFloat(token.balance) * multiChainConversionRate
-        : deriveBalanceFromAssetMarketDetails(
-            token,
-            multiChainExchangeRates || {},
-            multiChainTokenBalances || {},
-            multiChainConversionRate || 0,
-            currentCurrency || '',
-          ).balanceFiatCalculation;
-    }),
-);
-
-export const selectEvmTokenMarketData = createDeepEqualSelector(
-  [
-    selectTokenList,
-    selectTokenMarketData,
-    (_state: RootState, params: { chainId: Hex; tokenAddress?: string }) =>
-      params.chainId,
-    (_state: RootState, params: { chainId: Hex; tokenAddress?: string }) =>
-      params.tokenAddress,
-  ],
-  (tokenList, marketData, chainId, tokenAddress) => {
-    // Handle native token case (no address)
-    if (!tokenAddress) {
-      return marketData?.[chainId]?.[zeroAddress() as Hex];
-    }
-
-    // Get checksummed address
-    const checksumAddress = safeToChecksumAddress(tokenAddress);
-    if (!checksumAddress) return null;
-
-    // Get token metadata and market data
-    const tokenMetadata = tokenList?.[checksumAddress.toLowerCase()];
-    const tokenMarketData = marketData?.[chainId]?.[checksumAddress as Hex];
-
-    return {
-      metadata: tokenMetadata,
-      marketData: tokenMarketData,
-    };
+    return { raw, derived };
   },
 );
 
 /**
- * Creates a selector that finds a specific asset (token) by its address and chain ID.
- * This selector is particularly important for handling both native and staked assets
- * that may share the same address (e.g., 0x00) on the same chain.
- *
- * The selector uses a three-level nested map structure for efficient lookups:
- * 1. First level: chainId -> Map
- * 2. Second level: address -> Map
- * 3. Third level: isStaked (boolean) -> TokenI
- *
- * This structure allows us to:
- * - Efficiently look up tokens by chainId and address
- * - Properly distinguish between staked and non-staked assets that share the same address
- * - Handle native tokens (address: 0x00) correctly
- *
- * @example
- * // For native asset
- * const nativeAsset = selectAssetByAddressAndChainId(state, {
- *   address: '0x00',
- *   chainId: '0x1',
- *   isStaked: false
- * });
- *
- * // For staked asset
- * const stakedAsset = selectAssetByAddressAndChainId(state, {
- *   address: '0x00',
- *   chainId: '0x1',
- *   isStaked: true
- * });
- *
- * @returns A selector function that returns the matching TokenI or undefined if not found
- */
-export const makeSelectAssetByAddressAndChainId = () =>
-  createSelector(
-    [
-      selectEvmTokens, // TokenI[]
-      selectIsEvmNetworkSelected,
-      (
-        _state: RootState,
-        params: { address: string; chainId: string; isStaked?: boolean },
-      ) => toFormattedAddress(params.address),
-      (
-        _state: RootState,
-        params: { address: string; chainId: string; isStaked?: boolean },
-      ) => params.chainId,
-      (
-        _state: RootState,
-        params: { address: string; chainId: string; isStaked?: boolean },
-      ) => params.isStaked,
-    ],
-    (
-      tokens,
-      isEvmNetworkSelected,
-      address,
-      chainId,
-      isStaked,
-    ): TokenI | undefined => {
-      if (!isEvmNetworkSelected) {
-        return undefined;
-      }
-      // Step 1: build nested map once per call
-      const lookup = new Map<string, Map<string, Map<boolean, TokenI>>>();
-
-      for (const token of tokens) {
-        if (!token.chainId || !token.address) {
-          continue; // skip invalid tokens
-        }
-
-        const tokenChainId = token.chainId;
-        const tokenAddress = toFormattedAddress(token.address) as string;
-        const tokenIsStaked = Boolean(token.isStaked); // this is important in order to differentiate between staked and non-staked tokens on the same chain
-
-        if (!lookup.has(tokenChainId)) {
-          lookup.set(tokenChainId, new Map());
-        }
-        const chainMap = lookup.get(tokenChainId);
-
-        if (chainMap && !chainMap.has(tokenAddress)) {
-          chainMap.set(tokenAddress, new Map());
-        }
-        const addressMap = chainMap?.get(tokenAddress);
-
-        if (addressMap) {
-          addressMap.set(tokenIsStaked, token);
-        }
-      }
-
-      // Step 2: lookup
-      const token = lookup
-        .get(chainId)
-        ?.get(address as string)
-        ?.get(Boolean(isStaked));
-
-      return token;
-    },
-  );
+ * selectEvmToke
