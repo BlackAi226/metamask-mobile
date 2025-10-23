@@ -28,24 +28,29 @@ export type InternalAccountWithCaipAccountId = InternalAccount & {
 };
 
 /**
- *
- * @param state - Root redux state
- * @returns - AccountsController state
+ * Sélecteur principal du AccountsController dans le store Redux.
+ * On y ajoute un log pour les données brutes afin de faciliter le debug.
  */
-export const selectAccountsControllerState = (state: RootState) =>
-  state.engine.backgroundState.AccountsController;
+export const selectAccountsControllerState = (state: RootState) => {
+  const rawState = state.engine.backgroundState.AccountsController;
+  console.log('[AccountsController] Raw Redux State:', rawState);
+  return rawState;
+};
 
 /**
- * A memoized selector that returns internal accounts from the AccountsController.
+ * Retourne les comptes internes par ID, avec log des données brutes.
  */
 export const selectInternalAccountsById = createDeepEqualSelector(
   selectAccountsControllerState,
-  (accountControllerState): Record<AccountId, InternalAccount> =>
-    accountControllerState.internalAccounts.accounts,
+  (accountControllerState): Record<AccountId, InternalAccount> => {
+    const internalAccounts = accountControllerState.internalAccounts.accounts;
+    console.log('[AccountsController] Internal Accounts (raw):', internalAccounts);
+    return internalAccounts;
+  },
 );
 
 /**
- * A memoized selector that returns internal accounts from the AccountsController, sorted by the order of KeyringController's keyring accounts
+ * Retourne les comptes internes triés selon l’ordre du KeyringController.
  */
 export const selectInternalAccounts = createDeepEqualSelector(
   selectAccountsControllerState,
@@ -57,6 +62,7 @@ export const selectInternalAccounts = createDeepEqualSelector(
         index,
       ]),
     );
+
     const sortedAccounts = Object.values(
       accountControllerState.internalAccounts.accounts,
     ).sort(
@@ -64,34 +70,44 @@ export const selectInternalAccounts = createDeepEqualSelector(
         (keyringAccountsMap.get(toFormattedAddress(a.address)) || 0) -
         (keyringAccountsMap.get(toFormattedAddress(b.address)) || 0),
     );
+
+    console.log('[AccountsController] Sorted Accounts:', sortedAccounts);
     return sortedAccounts;
   },
 );
 
+/**
+ * Retourne uniquement les comptes EVM internes.
+ */
 export const selectInternalEvmAccounts = createSelector(
   selectInternalAccounts,
-  (accounts) => accounts.filter((account) => isEvmAccountType(account.type)),
+  (accounts) => {
+    const evmAccounts = accounts.filter((account) => isEvmAccountType(account.type));
+    console.log('[AccountsController] EVM Accounts:', evmAccounts);
+    return evmAccounts;
+  },
 );
 
 /**
- * A memoized selector that returns internal accounts from the AccountsController,
- * sorted by the order of KeyringController's keyring accounts,
- * with an additional caipAccountId property
+ * Retourne les comptes internes avec un identifiant CAIP complet.
  */
 export const selectInternalAccountsWithCaipAccountId = createDeepEqualSelector(
   selectInternalAccounts,
-  (accounts): InternalAccountWithCaipAccountId[] =>
-    accounts.map((account) => {
+  (accounts): InternalAccountWithCaipAccountId[] => {
+    const mapped = accounts.map((account) => {
       const { namespace, reference } = parseCaipChainId(account.scopes[0]);
       return {
         ...account,
         caipAccountId: `${namespace}:${reference}:${account.address}`,
       };
-    }),
+    });
+    console.log('[AccountsController] Accounts with CAIP ID:', mapped);
+    return mapped;
+  },
 );
 
 /**
- * A memoized selector that returns the selected internal account from the AccountsController
+ * Retourne le compte interne actuellement sélectionné.
  */
 export const selectSelectedInternalAccount = createDeepEqualSelector(
   selectAccountsControllerState,
@@ -101,6 +117,9 @@ export const selectSelectedInternalAccount = createDeepEqualSelector(
     const accountId = accountsControllerState.internalAccounts.selectedAccount;
     const account =
       accountsControllerState.internalAccounts.accounts[accountId];
+
+    console.log('[AccountsController] Selected Account ID:', accountId);
+    console.log('[AccountsController] Selected Account (raw):', account);
 
     if (!account) {
       const err = new Error(
@@ -113,71 +132,75 @@ export const selectSelectedInternalAccount = createDeepEqualSelector(
   },
 );
 
-/**
- * A memoized selector that returns the selected internal account id
- */
 export const selectSelectedInternalAccountId = createSelector(
   selectSelectedInternalAccount,
   (account): string | undefined => account?.id,
 );
 
 /**
- * A memoized selector that returns the internal accounts sorted by the last selected timestamp
+ * Trie les comptes internes par date de dernière sélection.
  */
 export const selectOrderedInternalAccountsByLastSelected = createSelector(
   selectAccountsControllerState,
   (accountsControllerState) => {
     const accounts = accountsControllerState.internalAccounts.accounts;
-
-    // Convert accounts object to array and sort by lastSelected timestamp
-    return Object.values(accounts).sort((a, b) => {
+    const sorted = Object.values(accounts).sort((a, b) => {
       const aLastSelected = a.metadata?.lastSelected || 0;
       const bLastSelected = b.metadata?.lastSelected || 0;
-
-      // Sort in descending order (most recent first)
       return bLastSelected - aLastSelected;
     });
+    console.log('[AccountsController] Ordered by Last Selected:', sorted);
+    return sorted;
   },
 );
 
+/**
+ * Récupère un compte interne à partir de son adresse.
+ */
 export const getMemoizedInternalAccountByAddress = createDeepEqualSelector(
   [selectInternalAccounts, (_state, address) => address],
-  (internalAccounts, address) =>
-    internalAccounts.find((account) =>
+  (internalAccounts, address) => {
+    const found = internalAccounts.find((account) =>
       areAddressesEqual(account.address, address),
-    ),
+    );
+    console.log('[AccountsController] Account by address:', address, found);
+    return found;
+  },
 );
 
 /**
- * A memoized selector that returns the last selected EVM account
+ * Dernier compte EVM sélectionné.
  */
 export const selectLastSelectedEvmAccount = createSelector(
   selectOrderedInternalAccountsByLastSelected,
-  (accounts) => accounts.find((account) => account.type === 'eip155:eoa'),
+  (accounts) => {
+    const found = accounts.find((account) => account.type === 'eip155:eoa');
+    console.log('[AccountsController] Last Selected EVM Account:', found);
+    return found;
+  },
 );
 
 /**
- * A memoized selector that returns the last selected Solana account
+ * Dernier compte Solana sélectionné.
  */
 export const selectLastSelectedSolanaAccount = createSelector(
   selectOrderedInternalAccountsByLastSelected,
-  (accounts) =>
-    accounts.find((account) => account.type === SolAccountType.DataAccount),
+  (accounts) => {
+    const found = accounts.find((account) => account.type === SolAccountType.DataAccount);
+    console.log('[AccountsController] Last Selected Solana Account:', found);
+    return found;
+  },
 );
 
-/**
- * A memoized selector that returns the selected internal account address in checksum format
- */
 export const selectSelectedInternalAccountFormattedAddress =
-  createDeepEqualSelector(selectSelectedInternalAccount, (account) =>
-    account?.address
+  createDeepEqualSelector(selectSelectedInternalAccount, (account) => {
+    const formatted = account?.address
       ? getFormattedAddressFromInternalAccount(account)
-      : undefined,
-  );
+      : undefined;
+    console.log('[AccountsController] Formatted Selected Address:', formatted);
+    return formatted;
+  });
 
-/**
- * A memoized selector that returns the previously selected EVM account
- */
 export const selectPreviouslySelectedEvmAccount = createDeepEqualSelector(
   selectInternalAccounts,
   (accounts) => {
@@ -195,70 +218,65 @@ export const selectPreviouslySelectedEvmAccount = createDeepEqualSelector(
       return bTimestamp - aTimestamp;
     })[0];
 
+    console.log('[AccountsController] Previously Selected EVM Account:', previouslySelectedEvmAccount);
     return previouslySelectedEvmAccount;
   },
 );
 
-/**
- * A memoized selector that returns the selected internal account address
- */
 export const selectSelectedInternalAccountAddress = createSelector(
   selectSelectedInternalAccount,
   (account) => {
     const selectedAddress = account?.address;
+    console.log('[AccountsController] Selected Account Address:', selectedAddress);
     return selectedAddress || undefined;
   },
 );
 
-/**
- * A memoized selector that returns whether the selected internal account can sign transactions
- */
 export const selectCanSignTransactions = createSelector(
   selectSelectedInternalAccount,
-  (selectedAccount) =>
-    (selectedAccount?.methods?.includes(EthMethod.SignTransaction) ||
-      selectedAccount?.methods?.includes(SolMethod.SignTransaction) ||
-      selectedAccount?.methods?.includes(SolMethod.SignMessage) ||
-      selectedAccount?.methods?.includes(SolMethod.SendAndConfirmTransaction) ||
-      selectedAccount?.methods?.includes(SolMethod.SignAndSendTransaction) ||
-      selectedAccount?.methods?.includes(BtcMethod.SignPsbt)) ??
-    false,
+  (selectedAccount) => {
+    const canSign =
+      (selectedAccount?.methods?.includes(EthMethod.SignTransaction) ||
+        selectedAccount?.methods?.includes(SolMethod.SignTransaction) ||
+        selectedAccount?.methods?.includes(SolMethod.SignMessage) ||
+        selectedAccount?.methods?.includes(SolMethod.SendAndConfirmTransaction) ||
+        selectedAccount?.methods?.includes(SolMethod.SignAndSendTransaction) ||
+        selectedAccount?.methods?.includes(BtcMethod.SignPsbt)) ??
+      false;
+    console.log('[AccountsController] Can Sign Transactions:', canSign);
+    return canSign;
+  },
 );
 
-/**
- * A selector that returns whether the user has already created a Solana mainnet account
- */
 export const selectHasCreatedSolanaMainnetAccount = createSelector(
   selectInternalAccounts,
-  (accounts) => accounts.some((account) => isSolanaAccount(account)),
+  (accounts) => {
+    const hasSolana = accounts.some((account) => isSolanaAccount(account));
+    console.log('[AccountsController] Has Solana Mainnet Account:', hasSolana);
+    return hasSolana;
+  },
 );
 
 ///: BEGIN:ONLY_INCLUDE_IF(keyring-snaps)
-
-/**
- * A selector that returns the solana account address
- * @param state - Root redux state
- * @returns - The solana account address
- */
 export const selectSolanaAccountAddress = createSelector(
   selectInternalAccounts,
-  (accounts) => accounts.find((account) => isSolanaAccount(account))?.address,
+  (accounts) => {
+    const solanaAddr = accounts.find((account) => isSolanaAccount(account))?.address;
+    console.log('[AccountsController] Solana Account Address:', solanaAddr);
+    return solanaAddr;
+  },
 );
 
 export const selectSolanaAccount = createSelector(
   selectInternalAccounts,
-  (accounts) => accounts.find((account) => isSolanaAccount(account)),
+  (accounts) => {
+    const solanaAcc = accounts.find((account) => isSolanaAccount(account));
+    console.log('[AccountsController] Solana Account:', solanaAcc);
+    return solanaAcc;
+  },
 );
-
 ///: END:ONLY_INCLUDE_IF
 
-/**
- * A memoized selector that returns all internal accounts that are valid for a given scope.
- *
- * For EVM scopes (eip155:*), this returns all accounts that have any EVM scope
- * (i.e., any scope that starts with 'eip155:'). For non-EVM scopes, this returns
- * all accounts that include the exact scope.
- */
 export const selectInternalAccountsByScope = createDeepEqualSelector(
   [
     selectInternalAccountsById,
@@ -269,24 +287,15 @@ export const selectInternalAccountsByScope = createDeepEqualSelector(
     scope: CaipChainId,
   ): InternalAccount[] => {
     const accounts = Object.values(accountsMap);
-    if (!Array.isArray(accounts) || accounts.length === 0) {
-      return [];
-    }
-
-    return accounts.filter(
+    const filtered = accounts.filter(
       (account) =>
         Array.isArray(account.scopes) && anyScopesMatch(account.scopes, scope),
     );
+    console.log('[AccountsController] Accounts by Scope:', scope, filtered);
+    return filtered;
   },
 );
 
-/**
- * Returns a function that takes an array of addresses and returns all internal accounts
- * that match any of the provided addresses. Address matching is case-insensitive.
- *
- * @param _state - Redux state (unused; required for selector signature)
- * @returns A function that, given an array of addresses, returns an array of InternalAccount objects that match
- */
 export const selectInternalAccountByAddresses = createDeepEqualSelector(
   [selectInternalAccountsById],
   (accountsMap) =>
@@ -295,8 +304,10 @@ export const selectInternalAccountByAddresses = createDeepEqualSelector(
       for (const account of Object.values(accountsMap)) {
         accountsByLowerCaseAddress.set(account.address.toLowerCase(), account);
       }
-      return addresses
-        .map((address) => accountsByLowerCaseAddress.get(address.toLowerCase())) // Normalize the input address
+      const result = addresses
+        .map((address) => accountsByLowerCaseAddress.get(address.toLowerCase()))
         .filter((account): account is InternalAccount => account !== undefined);
+      console.log('[AccountsController] Accounts by Addresses:', addresses, result);
+      return result;
     },
 );
