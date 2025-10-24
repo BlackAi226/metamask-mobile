@@ -578,3 +578,401 @@ export const getMultichainNetworkAggregatedBalance = (
     fiatBalances[assetId] = balanceInFiat.toString();
 
     // If the asset is the native asset of the chain, set it as total nativ
+// If the asset is the native asset of the chain, set it as total native token balance
+    if (assetId === nativeAssetId) {
+      totalNativeTokenBalance = balance;
+    }
+
+    // Always add to total fiat balance
+    if (totalBalanceFiat) {
+      totalBalanceFiat = totalBalanceFiat.plus(balanceInFiat);
+    } else {
+      totalBalanceFiat = rate !== undefined ? balanceInFiat : undefined;
+    }
+  }
+
+  return {
+    totalNativeTokenBalance,
+    totalBalanceFiat: totalBalanceFiat ? totalBalanceFiat.toNumber() : undefined,
+    tokenBalances: balances,
+    fiatBalances,
+  };
+};
+
+/**
+ * selectSelectedAccountMultichainNetworkAggregatedBalance
+ */
+export const selectSelectedAccountMultichainNetworkAggregatedBalance =
+  createDeepEqualSelector(
+    selectSelectedInternalAccount,
+    selectMultichainBalances,
+    // use functional accessors for assets & rates wrapped earlier
+    (_state: RootState) => selectMultichainAssets(_state).derived,
+    (_state: RootState) => selectMultichainAssetsRates(_state).derived,
+    (
+      selectedAccountWrapper,
+      multichainBalancesWrapper,
+      assetsDerived,
+      assetsRatesDerived,
+    ): RawDerived<MultichainNetworkAggregatedBalance> => {
+      const raw = {
+        selectedAccountRaw: selectedAccountWrapper?.raw,
+        selectedAccountDerived: selectedAccountWrapper?.derived,
+        multichainBalancesRaw: multichainBalancesWrapper?.raw,
+        multichainBalancesDerived: multichainBalancesWrapper?.derived,
+        assets: assetsDerived,
+        assetsRates: assetsRatesDerived,
+      };
+      console.log('[multichain.ts] selectSelectedAccountMultichainNetworkAggregatedBalance - raw', raw);
+
+      const selectedAccount = selectedAccountWrapper?.derived ?? null;
+      const multichainBalances = multichainBalancesWrapper?.derived ?? {};
+      const assets = assetsDerived ?? {};
+      const assetsRates = assetsRatesDerived ?? {};
+
+      if (!selectedAccount) {
+        return {
+          raw,
+          derived: {
+            totalNativeTokenBalance: undefined,
+            totalBalanceFiat: undefined,
+            tokenBalances: {},
+            fiatBalances: {},
+          },
+        };
+      }
+
+      const derived = getMultichainNetworkAggregatedBalance(
+        selectedAccount as InternalAccount,
+        multichainBalances as MultichainBalancesControllerState['balances'],
+        assets as MultichainAssetsControllerState['accountsAssets'],
+        assetsRates as MultichainAssetsRatesControllerState['conversionRates'],
+      );
+
+      return { raw, derived };
+    },
+  );
+
+/**
+ * selectMultichainNetworkAggregatedBalanceForAllAccounts
+ */
+interface MultichainNetworkAggregatedBalanceForAllAccounts {
+  [accountId: InternalAccount['id']]: MultichainNetworkAggregatedBalance;
+}
+
+export const selectMultichainNetworkAggregatedBalanceForAllAccounts =
+  createDeepEqualSelector(
+    selectInternalAccounts,
+    selectMultichainBalances,
+    (_state: RootState) => selectMultichainAssets(_state).derived,
+    (_state: RootState) => selectMultichainAssetsRates(_state).derived,
+    (
+      internalAccounts,
+      multichainBalancesWrapper,
+      assetsDerived,
+      assetsRatesDerived,
+    ): RawDerived<MultichainNetworkAggregatedBalanceForAllAccounts> => {
+      const raw = {
+        internalAccounts,
+        multichainBalancesRaw: multichainBalancesWrapper?.raw,
+        multichainBalancesDerived: multichainBalancesWrapper?.derived,
+        assets: assetsDerived,
+        assetsRates: assetsRatesDerived,
+      };
+      console.log('[multichain.ts] selectMultichainNetworkAggregatedBalanceForAllAccounts - raw', raw);
+
+      const multichainBalances = multichainBalancesWrapper?.derived ?? {};
+      const assets = assetsDerived ?? {};
+      const assetsRates = assetsRatesDerived ?? {};
+
+      const derived = internalAccounts.reduce((acc, account) => ({
+        ...acc,
+        [account.id]: getMultichainNetworkAggregatedBalance(
+          account,
+          multichainBalances as MultichainBalancesControllerState['balances'],
+          assets as MultichainAssetsControllerState['accountsAssets'],
+          assetsRates as MultichainAssetsRatesControllerState['conversionRates'],
+        ),
+      }), {} as MultichainNetworkAggregatedBalanceForAllAccounts);
+
+      return { raw, derived };
+    },
+  );
+
+/**
+ * Transaction helpers / selectors
+ */
+const DEFAULT_TRANSACTION_STATE_ENTRY = {
+  transactions: [],
+  next: null,
+  lastUpdated: 0,
+};
+
+interface NonEvmTransactionStateEntry {
+  transactions: NonEvmTransaction[];
+  next: null;
+  lastUpdated: number | undefined;
+}
+
+/**
+ * selectNonEvmTransactions
+ */
+export const selectNonEvmTransactions = createDeepEqualSelector(
+  selectMultichainTransactions,
+  selectSelectedInternalAccount,
+  selectSelectedNonEvmNetworkChainId,
+  selectIsSolanaTestnetEnabled,
+  (
+    nonEvmTransactionsWrapper,
+    selectedAccountWrapper,
+    selectedNonEvmNetworkChainId,
+    isSolanaTestnetEnabled,
+  ): RawDerived<NonEvmTransactionStateEntry> => {
+    const raw = {
+      nonEvmTransactionsRaw: nonEvmTransactionsWrapper?.raw,
+      nonEvmTransactionsDerived: nonEvmTransactionsWrapper?.derived,
+      selectedAccountRaw: selectedAccountWrapper?.raw,
+      selectedAccountDerived: selectedAccountWrapper?.derived,
+      selectedNonEvmNetworkChainId,
+      isSolanaTestnetEnabled,
+    };
+    console.log('[multichain.ts] selectNonEvmTransactions - raw', raw);
+
+    const selectedAccount = selectedAccountWrapper?.derived ?? null;
+    const nonEvmTransactions = nonEvmTransactionsWrapper?.derived ?? {};
+
+    if (!selectedAccount) {
+      return { raw, derived: DEFAULT_TRANSACTION_STATE_ENTRY };
+    }
+
+    const accountTransactions = nonEvmTransactions[selectedAccount.id];
+    if (!accountTransactions) {
+      return { raw, derived: DEFAULT_TRANSACTION_STATE_ENTRY };
+    }
+
+    if (
+      selectedNonEvmNetworkChainId === SolScope.Devnet &&
+      !isSolanaTestnetEnabled
+    ) {
+      return { raw, derived: DEFAULT_TRANSACTION_STATE_ENTRY };
+    }
+
+    const derived =
+      accountTransactions[selectedNonEvmNetworkChainId] ?? DEFAULT_TRANSACTION_STATE_ENTRY;
+
+    return { raw, derived };
+  },
+);
+
+/**
+ * selectNonEvmTransactionsForSelectedAccountGroup
+ */
+export const selectNonEvmTransactionsForSelectedAccountGroup =
+  createDeepEqualSelector(
+    selectMultichainTransactions,
+    selectSelectedAccountGroupInternalAccounts,
+    (nonEvmTransactionsWrapper, selectedGroupAccountsWrapper): RawDerived<NonEvmTransactionStateEntry> => {
+      const raw = {
+        nonEvmTransactionsRaw: nonEvmTransactionsWrapper?.raw,
+        nonEvmTransactionsDerived: nonEvmTransactionsWrapper?.derived,
+        selectedGroupAccounts: selectedGroupAccountsWrapper?.derived ?? selectedGroupAccountsWrapper?.raw,
+      };
+      console.log('[multichain.ts] selectNonEvmTransactionsForSelectedAccountGroup - raw', raw);
+
+      const nonEvmTransactions = nonEvmTransactionsWrapper?.derived ?? {};
+      const selectedGroupAccounts = selectedGroupAccountsWrapper?.derived ?? [];
+
+      if (!selectedGroupAccounts || selectedGroupAccounts.length === 0) {
+        return { raw, derived: DEFAULT_TRANSACTION_STATE_ENTRY };
+      }
+
+      const aggregated: NonEvmTransactionStateEntry = {
+        transactions: [],
+        next: null,
+        lastUpdated: 0,
+      };
+
+      for (const account of selectedGroupAccounts) {
+        const accountTx = nonEvmTransactions?.[account.id] as
+          | NonEvmTransactionStateEntry
+          | Record<string, NonEvmTransactionStateEntry>
+          | undefined;
+        if (!accountTx) {
+          continue;
+        }
+
+        const isSingleLevel = (
+          tx:
+            | NonEvmTransactionStateEntry
+            | Record<string, NonEvmTransactionStateEntry>,
+        ): tx is NonEvmTransactionStateEntry =>
+          Array.isArray((tx as NonEvmTransactionStateEntry).transactions);
+
+        const entries = isSingleLevel(accountTx)
+          ? [accountTx]
+          : Object.values(accountTx as Record<string, NonEvmTransactionStateEntry>);
+
+        for (const entry of entries) {
+          const txs = entry?.transactions ?? [];
+          aggregated.transactions.push(...txs);
+
+          const lu = entry?.lastUpdated;
+          if (typeof lu === 'number') {
+            aggregated.lastUpdated =
+              aggregated.lastUpdated !== undefined
+                ? Math.max(aggregated.lastUpdated, lu)
+                : lu;
+          }
+        }
+      }
+
+      aggregated.transactions.sort((a, b) => (b?.timestamp ?? 0) - (a?.timestamp ?? 0));
+
+      return { raw, derived: aggregated };
+    },
+  );
+
+/**
+ * makeSelectNonEvmAssetById
+ * Returns TokenI or undefined wrapped in RawDerived
+ */
+export const makeSelectNonEvmAssetById = () =>
+  createSelector(
+    [
+      selectIsEvmNetworkSelected,
+      selectMultichainBalances,
+      (_state: RootState) => selectMultichainAssetsMetadata(_state).derived,
+      selectMultichainAssetsRates,
+      (_: RootState, params: { accountId?: string; assetId: string }) =>
+        params.accountId,
+      (_: RootState, params: { accountId?: string; assetId: string }) =>
+        params.assetId as CaipAssetId,
+    ],
+    (
+      isEvmNetworkSelected,
+      multichainBalancesWrapper,
+      assetsMetadataDerived,
+      assetsRatesWrapper,
+      accountId,
+      assetId,
+    ): RawDerived<TokenI | undefined> => {
+      const raw = {
+        isEvmNetworkSelected,
+        multichainBalancesRaw: multichainBalancesWrapper?.raw,
+        multichainBalancesDerived: multichainBalancesWrapper?.derived,
+        assetsMetadata: assetsMetadataDerived,
+        assetsRatesRaw: assetsRatesWrapper?.raw,
+        assetsRatesDerived: assetsRatesWrapper?.derived,
+        accountId,
+        assetId,
+      };
+      console.log('[multichain.ts] makeSelectNonEvmAssetById - raw', raw);
+
+      if (isEvmNetworkSelected) {
+        return { raw, derived: undefined };
+      }
+      if (!accountId) {
+        throw new Error('Account ID is required to fetch asset.');
+      }
+
+      const balance = (multichainBalancesWrapper?.derived as any)?.[accountId]?.[assetId] || {
+        amount: undefined,
+        unit: '',
+      };
+
+      const { chainId, assetNamespace } = parseCaipAssetType(assetId);
+      const isNative = assetNamespace === 'slip44';
+      const rate = (assetsRatesWrapper?.derived as any)?.[assetId]?.rate || '0';
+
+      const balanceInFiat = balance.amount
+        ? new BigNumber(balance.amount).times(rate)
+        : undefined;
+
+      const assetMetadataFallback = {
+        name: balance.unit || '',
+        symbol: balance.unit || '',
+        fungible: true,
+        units: [{ name: assetId, symbol: balance.unit || '', decimals: 0 }],
+      };
+
+      const metadata = (assetsMetadataDerived as any)?.[assetId] || assetMetadataFallback;
+      const decimals = metadata.units[0]?.decimals || 0;
+
+      const derived: TokenI = {
+        name: metadata.name ?? '',
+        address: assetId,
+        symbol: metadata.symbol ?? '',
+        image: metadata.iconUrl,
+        logo: metadata.iconUrl,
+        decimals,
+        chainId,
+        isNative,
+        // ensure default amount string
+        balance: balance.amount ?? '0',
+        balanceFiat: balanceInFiat ? balanceInFiat.toString() : undefined,
+        isStakeable: false,
+        aggregators: [],
+        isETH: false,
+        ticker: metadata.symbol,
+      };
+
+      return { raw, derived };
+    },
+  );
+
+/**
+ * selectAccountsWithNativeBalanceByChainId
+ */
+export const selectAccountsWithNativeBalanceByChainId = createDeepEqualSelector(
+  selectInternalAccounts,
+  selectMultichainBalances,
+  (_: RootState, params: { chainId: string }) => params.chainId,
+  (
+    internalAccounts,
+    multichainBalancesWrapper,
+    chainId,
+  ): RawDerived<Record<string, Balance & { assetId: string }>> => {
+    const raw = {
+      internalAccounts,
+      multichainBalancesRaw: multichainBalancesWrapper?.raw,
+      multichainBalancesDerived: multichainBalancesWrapper?.derived,
+      chainId,
+    };
+    console.log('[multichain.ts] selectAccountsWithNativeBalanceByChainId - raw', raw);
+
+    const multichainBalances = multichainBalancesWrapper?.derived ?? {};
+
+    const derived = internalAccounts.reduce((list, account) => {
+      const accountBalances = multichainBalances?.[account.id];
+
+      if (!accountBalances) {
+        return list;
+      }
+
+      const nativeBalanceAssetId = Object.keys(accountBalances).find((assetId) => {
+        const { chainId: assetChainId, assetNamespace } = parseCaipAssetType(
+          assetId as CaipAssetId,
+        );
+        return assetChainId === chainId && assetNamespace === 'slip44';
+      });
+
+      if (nativeBalanceAssetId) {
+        const accountNativeBalance = accountBalances[nativeBalanceAssetId];
+
+        return {
+          ...list,
+          [account.id]: {
+            assetId: nativeBalanceAssetId,
+            ...accountNativeBalance,
+          },
+        };
+      }
+
+      return list;
+    }, {} as Record<string, Balance & { assetId: string }>);
+
+    return { raw, derived };
+  },
+);
+
+///: END:ONLY_INCLUDE_IF
